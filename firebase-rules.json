@@ -1,0 +1,124 @@
+{
+  "rules": {
+    "test": {
+      ".write": true,
+      ".read": true
+    },
+    "staff": {
+      ".write": true,
+      ".read": true
+    },
+    "staff_management": {
+      ".write": true,
+      ".read": true,
+      "Adding Staff": {
+        ".write": true,
+        ".read": true
+      },
+      "Removing Staff": {
+        ".write": true,
+        ".read": true
+      }
+    },
+    "student_management": {
+      ".write": true,
+      ".read": true,
+      "Adding Student": {
+        ".write": true,
+        ".read": true
+      },
+      "Removing Student": {
+        ".write": true,
+        ".read": true
+      }
+    },
+    "Department": {
+      ".write": true,
+      ".read": true
+    },
+    "CSE": {
+      ".write": true,
+      ".read": true
+    },
+    "ECE": {
+      ".write": true,
+      ".read": true
+    },
+    "MECH": {
+      ".write": true,
+      ".read": true
+    },
+    "CIVIL": {
+      ".write": true,
+      ".read": true
+    },
+    "IT": {
+      ".write": true,
+      ".read": true
+    },
+    "AIML": {
+      ".write": true,
+      ".read": true
+    },
+    "CYBER SECURITY": {
+      ".write": true,
+      ".read": true
+    },
+    "AIDS": {
+      ".write": true,
+      ".read": true
+    },
+    "EEE": {
+      ".write": true,
+      ".read": true
+    },
+    "ADMIN": {
+      ".write": true,
+      ".read": true
+    },
+    "DCSE": {
+      ".write": true,
+      ".read": true
+    },
+    "DECE": {
+      ".write": true,
+      ".read": true
+    },
+    "DMECH": {
+      ".write": true,
+      ".read": true
+    },
+    "management": {
+      ".write": true,
+      ".read": true
+    },
+    "students": {
+      ".write": true,
+      ".read": true,
+      "$department": {
+        ".write": true,
+        ".read": true
+      }
+    },
+    "passRequests": {
+      ".write": true,
+      ".read": true
+    },
+    "staff_details": {
+      ".write": true,
+      ".read": true
+    },
+    "student_details": {
+      ".write": true,
+      ".read": true
+    },
+    "ToHO": {
+      ".write": true,
+      ".read": true
+    },
+    "ToNA": {
+      ".write": true,
+      ".read": true
+    }
+  }
+}
