@@ -8,9 +8,16 @@ const fs = require('fs');
 // Force load .env using absolute path
 require('dotenv').config({ path: __dirname + '/.env' });
 
-// Logging function that writes to file and console
+// Logging function that writes to file and console (rotates at 10 MB)
 function log(...msg) {
-  fs.appendFileSync(__dirname + "/backend.log", msg.join(" ") + "\n");
+  try {
+    const logPath = __dirname + "/backend.log";
+    const stat = fs.existsSync(logPath) ? fs.statSync(logPath) : null;
+    if (stat && stat.size > 10 * 1024 * 1024) {
+      fs.renameSync(logPath, __dirname + "/backend.log.old");
+    }
+    fs.appendFileSync(logPath, msg.join(" ") + "\n");
+  } catch (_) {}
   console.log(...msg);
 }
 
@@ -26,7 +33,7 @@ const { database } = require('./firebaseConfig');
 class EasyTimeProBridge {
   constructor() {
     this.app = express();
-    this.port = process.env.PORT || 3003;
+    this.port = process.env.PORT || 3002;
     this.firebaseMonitor = new FirebaseMonitor();
     this.easyTimeService = new EasyTimeProService();
     this.managementLogsService = new ManagementLogsService(database, this.easyTimeService);
@@ -538,13 +545,13 @@ class EasyTimeProBridge {
       }
     });
 
-    // Test endpoint to clear processed requests
+    // Test endpoint to clear processed ToNA entries cache
     this.app.post('/test/clear-processed-requests', async (req, res) => {
       try {
-        this.passRequestMonitor.clearProcessedRequests();
+        this.passRequestMonitor.processedToNAEntries.clear();
         res.json({
           success: true,
-          message: 'Processed requests cache cleared'
+          message: 'Processed ToNA entries cache cleared'
         });
       } catch (error) {
         res.status(500).json({

@@ -1,326 +1,199 @@
-# EasyTime Pro Bridge Backend
+# SSEC Backend Service
 
-A Node.js backend service that acts as a bridge between Firebase Realtime Database and EasyTime Pro API. This service monitors Firebase collections in real-time and automatically processes EasyTime Pro API calls based on the data stored in Firebase.
+A Node.js bridge that runs as a Windows service, connecting the **EasyTime Pro biometric device** to **Firebase Realtime Database**. It listens for changes in Firebase and syncs them to the biometric system, and periodically pulls today's attendance transactions back into Firebase.
 
-## 🚀 Features
+---
 
-- **Real-time Monitoring**: Automatically detects changes in Firebase collections
-- **Automatic Processing**: Processes pending operations without manual intervention
-- **Status Updates**: Updates Firebase with operation results
-- **Error Recovery**: Handles failures gracefully and logs errors
-- **Service Health**: Provides health check endpoints
-- **Graceful Shutdown**: Properly stops monitoring on server shutdown
+## What It Does
 
-## 📁 Project Structure
+### 1. Staff & Student Management
+
+Monitors Firebase for add/edit/remove operations and calls the EasyTime Pro API accordingly.
+
+
+| Firebase Collection                             | Action                               |
+| ----------------------------------------------- | ------------------------------------ |
+| `staff_management/Adding Staff/{empCode}`       | Add staff to EasyTime Pro            |
+| `staff_management/Removing Staff/{empCode}`     | Remove staff from EasyTime Pro       |
+| `student_management/Adding Student/{empCode}`   | Add student to EasyTime Pro          |
+| `student_management/Removing Student/{empCode}` | Remove student from EasyTime Pro     |
+| `staff_details/{empCode}`                       | Edit staff details in EasyTime Pro   |
+| `student_details/{empCode}`                     | Edit student details in EasyTime Pro |
+
+
+Each record uses `status: "pending"` to trigger processing. The service updates it to `"processing"` → `"completed"` or `"failed"`.
+
+---
+
+### 2. Pass Requests → ToHO (Area Change to 2)
+
+When a warden approves a student pass request (`status: "warden_approved"`), the service:
+
+1. Finds the student's `easyTimeProId` in the `students` collection
+2. Saves the entry to `ToHO/{date}/{empCode}` with `{ employees, areas: [2], type, createdAt }`
+3. Calls EasyTime Pro API to move the student to **Area 2 (Hostel Out)**
+4. Updates the pass request status to `"area_changed"` in Firebase (prevents re-processing on restart)
+
+---
+
+### 3. ToNA → Return to Campus (Area Change to 3)
+
+When something writes to the `ToNA` collection with an `employees` array, the service:
+
+1. Finds all unprocessed entries (no `processedAt` timestamp)
+2. Calls EasyTime Pro API to move each employee to **Area 3 (NA / back inside)**, one by one
+3. Saves per-employee results and marks `processedAt` to prevent re-processing
+
+---
+
+### 4. Attendance Logs (Auto-Refresh Every 5 Minutes)
+
+Fetches today's punch transactions from EasyTime Pro and saves them to `management/{date}/{empCode}` in Firebase.
+
+- Only today's transactions are fetched (not historical)
+- Merges with existing data — preserves any `type` or `savedAt` already saved
+- The management collection is the sole output of this job; pass requests do not write to it
+
+---
+
+## Configuration
+
+### `.env`
 
 ```
-easytime-pro-bridge/
-├── server.js                 # Main server file
-├── package.json             # Dependencies
-├── env.example              # Environment variables template
-├── firebaseConfig.js        # Firebase configuration
-├── services/
-│   ├── easytimeService.js   # EasyTime Pro API service
-│   └── firebaseMonitor.js   # Firebase monitoring service
-└── README.md               # Documentation
-```
-
-## 🛠️ Installation & Setup
-
-### Prerequisites
-
-- Node.js (v14 or higher)
-- npm or yarn
-- Firebase project with Realtime Database
-- EasyTime Pro API access
-
-### Installation
-
-1. **Clone or download the project**
-   ```bash
-   # If you have the project files, navigate to the directory
-   cd easytime-pro-bridge
-   ```
-
-2. **Install dependencies**
-   ```bash
-   npm install
-   ```
-
-3. **Setup environment variables**
-   ```bash
-   # Copy the example environment file
-   cp env.example .env
-   
-   # Edit .env file with your configuration
-   # Update the values as needed
-   ```
-
-4. **Configure Firebase**
-   - Update `firebaseConfig.js` with your Firebase project configuration
-   - Ensure your Firebase project has Realtime Database enabled
-
-5. **Start the service**
-   ```bash
-   # For development
-   npm run dev
-   
-   # For production
-   npm start
-   ```
-
-## 🔧 Configuration
-
-### Environment Variables (.env)
-
-```env
-# EasyTime Pro API Configuration
 EASYTIMEPRO_API_URL=http://127.0.0.1:8081
 EASYTIMEPRO_USERNAME=admin
 EASYTIMEPRO_PASSWORD=Admin@123
-
-# Server Configuration
 PORT=3002
-NODE_ENV=development
+NODE_ENV=production
 ```
 
-### Firebase Configuration
+### `firebaseConfig.js`
 
-Update `firebaseConfig.js` with your Firebase project details:
+Update with your Firebase project credentials.
 
-```javascript
-const firebaseConfig = {
-  apiKey: "your-api-key",
-  authDomain: "your-project.firebaseapp.com",
-  databaseURL: "https://your-project-default-rtdb.region.firebasedatabase.app",
-  projectId: "your-project-id",
-  storageBucket: "your-project.appspot.com",
-  messagingSenderId: "your-sender-id",
-  appId: "your-app-id"
-};
-```
+---
 
-## 📊 Data Flow Architecture
+## Firebase Data Structure
 
-```
-Frontend (React) 
-    ↓ (API calls)
-NEW_BACKEND (Port 3001) 
-    ↓ (saves to Firebase)
-Firebase Realtime Database
-    ↓ (real-time monitoring)
-EasyTime Pro Bridge (Port 3002)
-    ↓ (API calls)
-EasyTime Pro API (Port 8081)
-```
-
-## 🔥 Firebase Collections Structure
-
-### Staff Management
 ```
 staff_management/
-├── Adding Staff/
-│   └── {emp_code}/
-│       ├── status: "pending" | "completed" | "failed"
-│       └── data: { emp_code, first_name, department, position, area, ... }
-└── Removing Staff/
-    └── {emp_code}/
-        ├── status: "pending" | "completed" | "failed"
-        └── data: { staff_id, easyTimeProId }
-```
+  Adding Staff/{empCode}/   status, data
+  Removing Staff/{empCode}/ status, data
 
-### Student Management
-```
 student_management/
-├── Adding Student/
-│   └── {emp_code}/
-│       ├── status: "pending" | "completed" | "failed"
-│       └── data: { emp_code, first_name, department, position, area, ... }
-└── Removing Student/
-    └── {emp_code}/
-        ├── status: "pending" | "completed" | "failed"
-        └── data: { staff_id, easyTimeProId }
+  Adding Student/{empCode}/ status, data
+  Removing Student/{empCode}/ status, data
+
+staff_details/{empCode}/    status, easyTimeProId, ...fields
+student_details/{empCode}/  status, easyTimeProId, ...fields
+
+staff/{empCode}/
+  easyTimeProId
+
+students/{department}/{empCode}/
+  easyTimeProId, emp_code, first_name, ...
+
+passRequests/{empCode}/{requestId}/
+  status, type, wardenApprovedBy, createdAt
+
+ToHO/{date}/{empCode}/
+  employees[], areas[], type, createdAt
+
+ToNA/{date}/{empCode}/
+  employees[], processedAt, results/{employeeId}
+
+management/{date}/{empCode}/
+  emp_code, name, department, position, transactions[]
 ```
 
-## 🌐 API Endpoints
+---
 
-### Health & Status
-- `GET /` - Root endpoint with API information
-- `GET /health` - Health check endpoint
-- `GET /status` - Service status (Firebase + EasyTime Pro connectivity)
+## Running the Service
 
-### Testing
-- `GET /test/easytime` - Test EasyTime Pro connection
-- `GET /test/firebase` - Test Firebase connection
-- `POST /test/save-easytime-id` - Test saving EasyTime Pro ID to staff collection
-- `POST /test/save-easytime-id-student` - Test saving EasyTime Pro ID to student's department collection (requires departmentId)
-- `POST /test/edit-staff` - Test editing staff in EasyTime Pro (requires easyTimeProId and updatedData)
-- `POST /test/edit-student` - Test editing student in EasyTime Pro (requires easyTimeProId and updatedData)
+### Development
 
-### Monitoring Control
-- `POST /monitoring/start` - Start Firebase monitoring
-- `POST /monitoring/stop` - Stop Firebase monitoring
-
-## 🔍 Monitoring Collections
-
-The service monitors the following Firebase collections:
-
-### Staff Management
-- `staff_management/Adding Staff/{emp_code}` - Process new staff additions
-- `staff_management/Removing Staff/{emp_code}` - Process staff removals
-
-### Student Management
-- `student_management/Adding Student/{emp_code}` - Process new student additions
-- `student_management/Removing Student/{emp_code}` - Process student removals
-
-## ⚙️ EasyTime Pro API Integration
-
-### Authentication
-- **Endpoint**: `POST /api-token-auth/`
-- **Method**: Token-based authentication
-- **Headers**: `Authorization: Token {token}`
-
-### Staff Management
-- **Add Staff**: `POST /personnel/api/employees/`
-- **Delete Staff**: `DELETE /personnel/api/employees/{id}/`
-- **Update Staff**: `PATCH /personnel/api/employees/{id}/`
-- **Get Staff**: `GET /personnel/api/employees/`
-
-### Transaction Logs
-- **Get Logs**: `GET /iclock/api/transactions/`
-
-## 📝 Status Updates
-
-The service automatically updates Firebase with operation results:
-
-- **Success**: `status: "completed"`
-- **Failure**: `status: "failed"`
-- **Pending**: `status: "pending"` (initial state)
-
-## 🚨 Error Handling & Logging
-
-### Logging Features
-- Authentication success/failure
-- API call results (success/failure)
-- Firebase monitoring status
-- Error details with stack traces
-- Status updates in Firebase
-
-### Error Handling
-- Network timeouts
-- Authentication failures
-- API rate limiting
-- Firebase connection issues
-- Graceful degradation
-
-## 🏥 Health Checks
-
-### Health Check Endpoint
-```bash
-curl http://localhost:3002/health
+```cmd
+npm run dev
 ```
 
-**Response:**
-```json
-{
-  "status": "healthy",
-  "timestamp": "2024-01-01T00:00:00.000Z",
-  "uptime": 3600,
-  "service": "EasyTime Pro Bridge"
-}
+### Production (Windows Service)
+
+**Install:**
+
+```cmd
+node install_service.js
 ```
 
-### Status Endpoint
-```bash
-curl http://localhost:3002/status
+**Start / Stop / Restart:**
+
+```cmd
+net start "SSEC-Backend-Service"
+net stop "SSEC-Backend-Service"
 ```
 
-**Response:**
-```json
-{
-  "service": "EasyTime Pro Bridge",
-  "timestamp": "2024-01-01T00:00:00.000Z",
-  "status": {
-    "server": "running",
-    "firebase": "connected",
-    "easyTimePro": "authenticated",
-    "monitoring": "active"
-  },
-  "details": {
-    "firebase": {
-      "connected": true,
-      "activeListeners": 4,
-      "listenerPaths": [
-        "staff_management/Adding Staff",
-        "staff_management/Removing Staff",
-        "student_management/Adding Student",
-        "student_management/Removing Student"
-      ]
-    },
-    "easyTimePro": {
-      "isAuthenticated": true,
-      "hasToken": true,
-      "baseURL": "http://127.0.0.1:8081",
-      "username": "admin"
-    },
-    "monitoring": {
-      "isMonitoring": true,
-      "activeListeners": 4
-    }
-  }
-}
+Or right-click `restart_service.bat` → Run as administrator.
+
+**Reinstall after code changes:**
+
+```cmd
+node uninstall_service.js
+node install_service.js
+net start "SSEC-Backend-Service"
 ```
 
-## 🔄 Expected Behavior
+**Check if running:**
 
-1. **Startup**: Server starts, authenticates with EasyTime Pro, begins Firebase monitoring
-2. **Monitoring**: Listens for changes in Firebase collections
-3. **Processing**: When new data appears with `status: "pending"`, processes it via EasyTime Pro API
-4. **Status Update**: Updates Firebase with `status: "completed"` or `status: "failed"`
-5. **Logging**: Logs all operations and results
-6. **Shutdown**: Stops monitoring and closes connections gracefully
-
-## 🛡️ Security Considerations
-
-- Store sensitive credentials in environment variables
-- Use HTTPS in production
-- Implement proper authentication for API endpoints
-- Monitor and log all API interactions
-- Implement rate limiting for external API calls
-
-## 🚀 Production Deployment
-
-### Environment Setup
-1. Set `NODE_ENV=production`
-2. Use a process manager like PM2
-3. Configure proper logging
-4. Set up monitoring and alerting
-5. Use HTTPS certificates
-
-### PM2 Configuration
-```json
-{
-  "apps": [{
-    "name": "easytime-pro-bridge",
-    "script": "server.js",
-    "instances": 1,
-    "exec_mode": "fork",
-    "env": {
-      "NODE_ENV": "production",
-      "PORT": 3002
-    }
-  }]
-}
+```
+http://localhost:3002/health
 ```
 
-## 📞 Support
+---
 
-For issues and questions:
-1. Check the logs for error messages
-2. Verify Firebase and EasyTime Pro connectivity
-3. Test individual endpoints
-4. Check environment configuration
+## API Endpoints
 
-## 📄 License
 
-This project is part of the EasyTime Pro integration system.
+| Method | Path                                   | Description                                 |
+| ------ | -------------------------------------- | ------------------------------------------- |
+| GET    | `/health`                              | Health check                                |
+| GET    | `/status`                              | Firebase + EasyTime Pro connectivity status |
+| GET    | `/test/easytime`                       | Test EasyTime Pro auth                      |
+| GET    | `/test/firebase`                       | Test Firebase connection                    |
+| POST   | `/monitoring/start`                    | Start Firebase listeners                    |
+| POST   | `/monitoring/stop`                     | Stop Firebase listeners                     |
+| GET    | `/api/management/logs`                 | Get today's management logs from Firebase   |
+| GET    | `/api/management/logs?date=YYYY-MM-DD` | Get logs for a specific date                |
+| POST   | `/api/management/refresh`              | Force-refresh today's transactions now      |
+| GET    | `/api/management/status`               | Check if a refresh is currently running     |
+
+
+---
+
+## Logs
+
+- `**backend.log**` — application output, rotates at 10 MB → `backend.log.old`
+- `**daemon/ssecbackendservice.err.log**` — Windows service errors
+- `**daemon/ssecbackendservice.out.log**` — Windows service stdout
+
+---
+
+## Troubleshooting
+
+**Service won't start**
+
+- Check `daemon/ssecbackendservice.err.log`
+- Verify `.env` exists and has correct values
+- Confirm Node.js is installed: `node --version`
+- Confirm port 3002 is free
+
+**Students not moving to ToHO**
+
+- Confirm pass request has `status: "warden_approved"` and a `type` field (`"outing"` or `"home_visit"`)
+- Confirm the student exists in `students/{department}/{empCode}` and has an `easyTimeProId`
+- Check `backend.log` for `Found student` or `No easyTimeProId found` messages
+- If `easyTimeProId` is missing, the student must be re-added through the management flow
+
+**Code changes not reflected**
+
+- The service must be restarted after any file change: `restart_service.bat`
+

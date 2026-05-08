@@ -185,6 +185,33 @@ class EasyTimeProService {
   }
 
   /**
+   * Find a single employee in EasyTime Pro by emp_code.
+   * Returns the employee object if found, or null.
+   * @param {string} empCode
+   * @returns {Promise<Object|null>}
+   */
+  async findEmployeeByEmpCode(empCode) {
+    try {
+      if (!this.isAuthenticated) {
+        const ok = await this.authenticate();
+        if (!ok) throw new Error('Authentication failed');
+      }
+
+      const response = await axios.get(
+        `${this.baseURL}/personnel/api/employees/?emp_code=${encodeURIComponent(empCode)}`,
+        { headers: this.getAuthHeaders(), timeout: 15000 }
+      );
+
+      const results = response.data.data || response.data.results || [];
+      const match = results.find(e => String(e.emp_code) === String(empCode));
+      return match || null;
+    } catch (error) {
+      console.error(`❌ Failed to search EasyTime Pro for emp_code ${empCode}:`, error.message);
+      return null;
+    }
+  }
+
+  /**
    * Get all staff members from EasyTime Pro
    * @returns {Promise<Object>} API response
    */

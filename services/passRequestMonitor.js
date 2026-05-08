@@ -6,8 +6,7 @@ class PassRequestMonitor {
   constructor() {
     this.database = database;
     this.easyTimeService = new EasyTimeProService();
-    this.processedRequests = new Set(); // Track processed requests to prevent duplicates
-    this.processedToNAEntries = new Set(); // Track processed ToNA entries (by path)
+    this.processedToNAEntries = new Set(); // Track processed ToNA entries (by path) for this session
     this.isMonitoring = false;
     this.toHOMonitorInterval = null; // Scheduled monitor for ToHO collection
   }
@@ -29,13 +28,21 @@ class PassRequestMonitor {
       // Monitor passRequests collection (ToHO flow)
       const passRequestsRef = ref(this.database, 'passRequests');
       onValue(passRequestsRef, (snapshot) => {
-        this.handlePassRequestChange(snapshot);
+        this.handlePassRequestChange(snapshot).catch((err) => {
+          console.error('❌ Unhandled error in pass request handler:', err.message);
+        });
+      }, (error) => {
+        console.error('❌ Firebase listener error (passRequests):', error.message);
       });
 
       // Monitor ToNA collection (return to NA flow)
       const toNARef = ref(this.database, 'ToNA');
       onValue(toNARef, (snapshot) => {
-        this.handleToNAChange(snapshot);
+        this.handleToNAChange(snapshot).catch((err) => {
+          console.error('❌ Unhandled error in ToNA handler:', err.message);
+        });
+      }, (error) => {
+        console.error('❌ Firebase listener error (ToNA):', error.message);
       });
 
       // Start scheduled monitor for ToHO collection
@@ -111,6 +118,9 @@ class PassRequestMonitor {
         const employees = node.employees.filter((e) => !!e);
         if (!employees.length) continue;
 
+        // Add to in-memory cache BEFORE processing so concurrent listener fires skip it
+        this.processedToNAEntries.add(pathKey);
+
         console.log(`🎯 Processing ToNA area change for ${pathKey} (one-by-one)`);
 
         let successCount = 0;
@@ -184,16 +194,9 @@ class PassRequestMonitor {
   async processPassRequest(empCode, request, requestId = null) {
     try {
       const fullRequestId = requestId || request.id;
-      
-      // Check if already processed
-      if (this.processedRequests.has(fullRequestId)) {
-        console.log(`⏭️ Skipping already processed request: ${fullRequestId}`);
-        return;
-      }
 
-      // Check if status is warden_approved
+      // Skip if not warden_approved — covers 'area_changed', 'completed', 'pending', etc.
       if (request.status !== 'warden_approved') {
-        console.log(`⏭️ Skipping request ${fullRequestId} - status: ${request.status} (not warden_approved)`);
         return;
       }
 
@@ -233,18 +236,20 @@ class PassRequestMonitor {
         throw toHOError;
       }
       
-      // Save type to management collection (date/empCode structure)
-      if (requestType) {
-        await this.saveToManagementCollection(empCode, requestType);
-      }
-      
       // THEN change area to 2 (HO)
       const areaChangeResult = await this.easyTimeService.changeEmployeeArea([easyTimeProId], [2]);
-      
+
       if (areaChangeResult.success) {
-        // Mark as processed
-        this.processedRequests.add(fullRequestId);
-        
+        // Update Firebase status — this is the durable record; no in-memory Set needed
+        const statusPath = requestId
+          ? `passRequests/${empCode}/${requestId}/status`
+          : `passRequests/${empCode}/status`;
+        try {
+          await set(ref(this.database, statusPath), 'area_changed');
+        } catch (statusErr) {
+          console.error(`⚠️ Could not update passRequest status in Firebase:`, statusErr.message);
+        }
+
         console.log(`✅ Area changed successfully for ${empCode} (${easyTimeProId})`);
       } else {
         console.error(`❌ Failed to change area for ${empCode}:`, areaChangeResult.error);
@@ -264,23 +269,41 @@ class PassRequestMonitor {
    */
   async findStudentByEmpCode(empCode) {
     try {
-      // Get all students data
       const studentsRef = ref(this.database, 'students');
       const snapshot = await get(studentsRef);
-      
+
       if (!snapshot.exists()) {
+        console.log(`⚠️ students collection is empty`);
         return null;
       }
 
       const studentsData = snapshot.val();
-      
-      // Search through all departments
+
       for (const department in studentsData) {
-        if (studentsData[department] && studentsData[department][empCode]) {
-          return studentsData[department][empCode];
+        const deptStudents = studentsData[department];
+        if (!deptStudents || typeof deptStudents !== 'object') continue;
+
+        // Case 1: empCode is the direct key (e.g. students/CSE/21CS001)
+        if (deptStudents[empCode]) {
+          console.log(`🔍 Found student ${empCode} in students/${department} (by key)`);
+          return deptStudents[empCode];
+        }
+
+        // Case 2: empCode stored as emp_code or username field under an auto-generated key
+        for (const key of Object.keys(deptStudents)) {
+          const student = deptStudents[key];
+          if (
+            student &&
+            typeof student === 'object' &&
+            (student.emp_code === empCode || student.username === empCode)
+          ) {
+            console.log(`🔍 Found student ${empCode} in students/${department}/${key} (by field)`);
+            return student;
+          }
         }
       }
 
+      console.log(`⚠️ Student ${empCode} not found in any department`);
       return null;
     } catch (error) {
       console.error('❌ Error finding student:', error.message);
@@ -376,30 +399,6 @@ class PassRequestMonitor {
     }
   }
 
-  /**
-   * Save type to management collection
-   * @param {string} empCode - Employee code
-   * @param {string} type - Request type ("outing" or "home_visit")
-   */
-  async saveToManagementCollection(empCode, type) {
-    try {
-      // Compute today's date (YYYY-MM-DD)
-      const dateStr = new Date().toISOString().split('T')[0];
-
-      // Save type under management/{date}/{empCode}
-      const managementData = {
-        type: type,
-        savedAt: new Date().toISOString()
-      };
-
-      const managementRef = ref(this.database, `management/${dateStr}/${empCode}`);
-      await set(managementRef, managementData);
-      
-      console.log(`💾 Saved type "${type}" to management collection: ${dateStr}/${empCode}`);
-    } catch (error) {
-      console.error('❌ Error saving to management collection:', error.message);
-    }
-  }
 
   /**
    * Get monitoring status
@@ -408,17 +407,9 @@ class PassRequestMonitor {
   getMonitoringStatus() {
     return {
       isMonitoring: this.isMonitoring,
-      processedRequests: Array.from(this.processedRequests),
-      processedCount: this.processedRequests.size
+      processedToNAEntries: Array.from(this.processedToNAEntries),
+      processedToNACount: this.processedToNAEntries.size
     };
-  }
-
-  /**
-   * Clear processed requests (for testing)
-   */
-  clearProcessedRequests() {
-    this.processedRequests.clear();
-    console.log('🧹 Cleared processed requests cache');
   }
 
   /**
@@ -477,8 +468,9 @@ class PassRequestMonitor {
         for (const empCode in toHOData[date]) {
           const entry = toHOData[date][empCode];
           if (!entry || !entry.employees || !Array.isArray(entry.employees) || entry.employees.length === 0) continue;
-          
-          const easyTimeProId = entry.employees[0];
+
+          const easyTimeProId = entry.employees.find((e) => !!e);
+          if (!easyTimeProId) continue;
           const type = entry.type;
           const createdAt = entry.createdAt ? new Date(entry.createdAt) : null;
           

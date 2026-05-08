@@ -10,54 +10,64 @@ class ManagementLogsService {
   }
 
   /**
-   * Fetch transactions from EasyTime Pro API with pagination support
-   * @param {number} limit - Number of transactions to fetch
+   * Fetch today's transactions from EasyTime Pro API with pagination support.
+   * Only fetches for today (midnight to now) to avoid re-processing historical data.
+   * @param {number} limit - Max transactions to fetch (safety cap)
    * @returns {Promise<Array>} Array of transactions
    */
-  async fetchTransactions(limit = 50000) {
+  async fetchTransactions(limit = 5000) {
     try {
-      console.log(`📊 Fetching transactions from EasyTime Pro (limit: ${limit})...`);
-      
-      // Authenticate first
+      // Today's date string for client-side filtering (format matches API: "YYYY-MM-DD")
+      const todayStr = new Date().toISOString().split('T')[0];
+
+      console.log(`📊 Fetching transactions from EasyTime Pro for today (${todayStr}), limit: ${limit}...`);
+
       await this.easyTimeService.authenticate();
-      
+
       let allTransactions = [];
-      let nextUrl = `${this.easyTimeService.baseURL}/iclock/api/transactions/?limit=${Math.min(limit, 1000)}&ordering=-punch_time`;
+      const pageSize = 1000;
+      // ordering=punch_time (ascending) so newest entries appear last — we stop early once we pass today
+      let nextUrl = `${this.easyTimeService.baseURL}/iclock/api/transactions/?limit=${pageSize}&ordering=-punch_time`;
       let pageCount = 0;
-      const maxPages = Math.ceil(limit / 1000); // Prevent infinite loops
-      
+      const maxPages = Math.ceil(limit / pageSize);
+
       while (nextUrl && pageCount < maxPages) {
         console.log(`📄 Fetching page ${pageCount + 1}...`);
-        
+
         const response = await axios.get(nextUrl, {
           headers: {
             'Authorization': `Token ${this.easyTimeService.token}`,
             'Content-Type': 'application/json'
-          }
+          },
+          timeout: 30000
         });
 
         const pageData = response.data.data || [];
-        allTransactions = allTransactions.concat(pageData);
-        
-        console.log(`✅ Page ${pageCount + 1}: ${pageData.length} transactions (Total: ${allTransactions.length})`);
-        
-        // Check if there's a next page
+
+        // Filter to today only (API returns newest first due to ordering=-punch_time)
+        const todayData = pageData.filter(t => t.punch_time && t.punch_time.startsWith(todayStr));
+        allTransactions = allTransactions.concat(todayData);
+
+        // If this page had no records for today, all remaining pages are older — stop early
+        if (todayData.length === 0 && pageData.length > 0) {
+          console.log(`📅 No more today's records — stopping early`);
+          break;
+        }
+
         nextUrl = response.data.next;
         pageCount++;
-        
-        // Stop if we've reached the limit
+
         if (allTransactions.length >= limit) {
           allTransactions = allTransactions.slice(0, limit);
           break;
         }
-        
-        // Small delay to avoid overwhelming the API
+
         if (nextUrl) {
           await new Promise(resolve => setTimeout(resolve, 100));
         }
       }
 
-      console.log(`✅ Total fetched: ${allTransactions.length} transactions across ${pageCount} pages`);
+      console.log(`✅ Total today's transactions: ${allTransactions.length} across ${pageCount} pages`);
       return allTransactions;
     } catch (error) {
       console.error('❌ Error fetching transactions:', error.message);
@@ -319,7 +329,6 @@ class ManagementLogsService {
         this.getFirebaseData('passRequests')
       ]);
 
-      console.log(`📊 Loaded Firebase data - Staff: ${Object.keys(staffData).length}, Students: ${Object.keys(studentsData).length}`);
 
       // Group transactions by date
       const transactionsByDate = {};
@@ -374,9 +383,6 @@ class ManagementLogsService {
           processedCount++;
         } else {
           notFoundCount++;
-          if (notFoundCount <= 5) {
-            console.log(`⚠️ Transaction for ${empCode} not found in Firebase staff/students`);
-          }
         }
       }
       
@@ -397,48 +403,46 @@ class ManagementLogsService {
   async saveLogsToFirebase(transactionsByDate) {
     try {
       console.log('💾 Saving processed logs to Firebase management collection...');
-      
-      // Save each date as a separate document in the management collection
+
       const savePromises = [];
-      
+
       for (const [date, transactions] of Object.entries(transactionsByDate)) {
-        // Get existing data for this date to preserve fields like 'type' and 'savedAt'
-        const existingData = await this.getFirebaseData(`management/${date}`);
-        
-        // Merge new transaction data with existing data
+        // Fetch existing management data and ToHO data for this date in parallel
+        const [existingData, toHOData] = await Promise.all([
+          this.getFirebaseData(`management/${date}`),
+          this.getFirebaseData(`ToHO/${date}`)
+        ]);
+
         const mergedData = {};
-        
+
         for (const [empCode, transactionData] of Object.entries(transactions)) {
-          // If employee already exists, merge fields (preserve type, savedAt, etc.)
-          if (existingData[empCode]) {
-            // Preserve type and savedAt from existing data, merge rest with transaction data
-            mergedData[empCode] = {
-              ...transactionData,        // Start with new transaction data
-              ...(existingData[empCode].type && { type: existingData[empCode].type }),     // Preserve type
-              ...(existingData[empCode].savedAt && { savedAt: existingData[empCode].savedAt }) // Preserve savedAt
-            };
-          } else {
-            // New employee entry, use transaction data as-is
-            mergedData[empCode] = transactionData;
-          }
+          // Pull type from ToHO/{date}/{empCode} — the authoritative source
+          const toHOEntry = toHOData[empCode];
+          const type = toHOEntry && toHOEntry.type ? toHOEntry.type : null;
+
+          const existing = existingData[empCode] || {};
+
+          mergedData[empCode] = {
+            ...transactionData,
+            // ToHO type takes priority; fall back to whatever was already saved
+            ...(type ? { type } : existing.type ? { type: existing.type } : {})
+          };
         }
-        
-        // Also preserve any employees that exist in Firebase but not in new transactions
+
+        // Preserve employees that exist in Firebase but had no transactions today
         for (const [empCode, existingEmployeeData] of Object.entries(existingData)) {
           if (!mergedData[empCode]) {
             mergedData[empCode] = existingEmployeeData;
           }
         }
-        
+
         const dateRef = ref(this.database, `management/${date}`);
         savePromises.push(set(dateRef, mergedData));
-        console.log(`📅 Saving ${Object.keys(transactions).length} employees for date: ${date} (merged with existing data)`);
       }
-      
-      // Save all dates in parallel
+
       await Promise.all(savePromises);
-      
-      console.log(`✅ Logs saved successfully to Firebase (${Object.keys(transactionsByDate).length} dates)`);
+
+      console.log(`✅ Logs saved to Firebase (${Object.keys(transactionsByDate).length} dates)`);
       this.lastUpdateTime = new Date().toISOString();
     } catch (error) {
       console.error('❌ Error saving logs to Firebase:', error.message);
@@ -451,7 +455,7 @@ class ManagementLogsService {
    * @param {number} limit - Number of transactions to fetch
    * @returns {Promise<Object>} Processed logs organized by date
    */
-  async fetchAndProcessTransactions(limit = 50000) {
+  async fetchAndProcessTransactions(limit = 5000) {
     if (this.isProcessing) {
       console.log('⏳ Transaction processing already in progress...');
       return { success: false, message: 'Processing already in progress' };

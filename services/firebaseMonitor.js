@@ -2,6 +2,29 @@ const { ref, onValue, set, get } = require('firebase/database');
 const { database, testFirebaseConnection } = require('../firebaseConfig');
 const EasyTimeProService = require('./easytimeService');
 
+// Department ID → Firebase collection name mapping.
+// Add new departments here whenever the system grows.
+const DEPARTMENTS = [
+  { id: 1,  name: 'Department' },
+  { id: 2,  name: 'CSE' },
+  { id: 3,  name: 'ECE' },
+  { id: 4,  name: 'MECH' },
+  { id: 5,  name: 'CIVIL' },
+  { id: 6,  name: 'IT' },
+  { id: 7,  name: 'AIML' },
+  { id: 8,  name: 'CYBER SECURITY' },
+  { id: 9,  name: 'AIDS' },
+  { id: 10, name: 'EEE' },
+  { id: 11, name: 'DCSE' },
+  { id: 12, name: 'DECE' },
+  { id: 13, name: 'DMECH' },
+  { id: 14, name: 'ADMIN' },
+  { id: 15, name: 'S&H' },
+  { id: 17, name: 'OTHERS' },
+  { id: 18, name: 'DAUTO' },
+  { id: 19, name: 'DEEE' },
+];
+
 class FirebaseMonitor {
   constructor() {
     this.database = database;
@@ -182,17 +205,19 @@ class FirebaseMonitor {
         const staffData = data[empCode];
         
         if (staffData.status === 'pending') {
-          // Double-check current status in Firebase to prevent duplicate processing
           const currentStatusRef = ref(this.database, `staff_management/${collectionType}/${empCode}/status`);
           const currentStatusSnap = await get(currentStatusRef);
-          
+
           if (!currentStatusSnap.exists() || currentStatusSnap.val() !== 'pending') {
             console.log(`⏭️ Skipping ${empCode} - status changed to ${currentStatusSnap.val() || 'unknown'} (already processed)`);
             continue;
           }
-          
+
+          // Immediately claim this record to block concurrent duplicate processing
+          await set(currentStatusRef, 'processing');
+
           console.log(`🔄 Processing ${collectionType} for employee: ${empCode}`);
-          
+
           if (collectionType === 'Adding Staff') {
             await this.processAddStaff(empCode, staffData);
           } else if (collectionType === 'Removing Staff') {
@@ -223,17 +248,19 @@ class FirebaseMonitor {
         const studentData = data[empCode];
         
         if (studentData.status === 'pending') {
-          // Double-check current status in Firebase to prevent duplicate processing
           const currentStatusRef = ref(this.database, `student_management/${collectionType}/${empCode}/status`);
           const currentStatusSnap = await get(currentStatusRef);
-          
+
           if (!currentStatusSnap.exists() || currentStatusSnap.val() !== 'pending') {
             console.log(`⏭️ Skipping ${empCode} - status changed to ${currentStatusSnap.val() || 'unknown'} (already processed)`);
             continue;
           }
-          
+
+          // Immediately claim this record to block concurrent duplicate processing
+          await set(currentStatusRef, 'processing');
+
           console.log(`🔄 Processing ${collectionType} for student: ${empCode}`);
-          
+
           if (collectionType === 'Adding Student') {
             await this.processAddStudent(empCode, studentData);
           } else if (collectionType === 'Removing Student') {
@@ -267,17 +294,19 @@ class FirebaseMonitor {
         console.log(`📊 Processing ${empCode}:`, JSON.stringify(editData, null, 2));
         
         if (editData.status === 'pending') {
-          // Double-check current status in Firebase to prevent duplicate processing
           const currentStatusRef = ref(this.database, `${collectionType}/${empCode}/status`);
           const currentStatusSnap = await get(currentStatusRef);
-          
+
           if (!currentStatusSnap.exists() || currentStatusSnap.val() !== 'pending') {
             console.log(`⏭️ Skipping ${empCode} - status changed to ${currentStatusSnap.val() || 'unknown'} (already processed)`);
             continue;
           }
-          
+
+          // Immediately claim this record to block concurrent duplicate processing
+          await set(currentStatusRef, 'processing');
+
           console.log(`🔄 Processing edit for ${collectionType}: ${empCode}`);
-          
+
           if (collectionType === 'staff_details') {
             await this.processEditStaff(empCode, editData);
           } else if (collectionType === 'student_details') {
@@ -488,43 +517,45 @@ class FirebaseMonitor {
       // Extract easyTimeProId from the edit data
       let easyTimeProId = editData.easyTimeProId;
       
-      // If no easyTimeProId, try to add the student first
+      // easyTimeProId missing — the student likely exists in EasyTime Pro but the ID wasn't saved.
+      // Search EasyTime Pro by emp_code first to avoid creating a duplicate entry.
       if (!easyTimeProId) {
-        console.log(`⚠️ No easyTimeProId found for student ${empCode}. Attempting to add student first...`);
-        
-        // Extract the updated data (excluding status and easyTimeProId)
+        console.log(`⚠️ No easyTimeProId for student ${empCode}. Searching EasyTime Pro by emp_code...`);
+
         const { status, easyTimeProId: _, timestamp, updatedAt, area_code, area_name, birthday, ...studentData } = editData;
-        
-        // Clean the data for EasyTime Pro API
-        const cleanedStudentData = {
-          emp_code: studentData.emp_code,
-          first_name: studentData.first_name,
-          department: studentData.department,
-          position: studentData.position,
-          area: studentData.area
-        };
-        
-        // Add optional fields only if they exist and are valid
-        if (studentData['aadhaar no']) {
-          cleanedStudentData['aadhaar no'] = studentData['aadhaar no'];
-        }
-        if (studentData['contact no']) {
-          cleanedStudentData['contact no'] = studentData['contact no'];
-        }
-        
-        // Try to add the student to EasyTime Pro
-        const addResult = await this.easyTimeService.addStaffMember(cleanedStudentData);
-        
-        if (addResult.success && addResult.data && addResult.data.id) {
-          easyTimeProId = addResult.data.id;
-          console.log(`✅ Successfully added student ${empCode} to EasyTime Pro with ID: ${easyTimeProId}`);
-          
-          // Save the easyTimeProId to the student data
+
+        // Step 1: try to find the existing record
+        const existing = await this.easyTimeService.findEmployeeByEmpCode(empCode);
+
+        if (existing && existing.id) {
+          easyTimeProId = existing.id;
+          console.log(`✅ Found existing EasyTime Pro record for ${empCode}, ID: ${easyTimeProId}. Saving to Firebase...`);
           await this.saveEasyTimeProIdToStudent(empCode, easyTimeProId, studentData);
         } else {
-          console.error(`❌ Failed to add student ${empCode} to EasyTime Pro:`, addResult.error);
-          await this.updateEditStatus('student_details', empCode, 'failed');
-          return;
+          // Step 2: genuinely not in EasyTime Pro — add them
+          console.log(`ℹ️ Student ${empCode} not found in EasyTime Pro. Adding...`);
+
+          const cleanedStudentData = {
+            emp_code: studentData.emp_code,
+            first_name: studentData.first_name,
+            department: studentData.department,
+            position: studentData.position,
+            area: studentData.area
+          };
+          if (studentData['aadhaar no']) cleanedStudentData['aadhaar no'] = studentData['aadhaar no'];
+          if (studentData['contact no']) cleanedStudentData['contact no'] = studentData['contact no'];
+
+          const addResult = await this.easyTimeService.addStaffMember(cleanedStudentData);
+
+          if (addResult.success && addResult.data && addResult.data.id) {
+            easyTimeProId = addResult.data.id;
+            console.log(`✅ Added student ${empCode} to EasyTime Pro with ID: ${easyTimeProId}`);
+            await this.saveEasyTimeProIdToStudent(empCode, easyTimeProId, studentData);
+          } else {
+            console.error(`❌ Could not find or add student ${empCode} in EasyTime Pro:`, addResult.error);
+            await this.updateEditStatus('student_details', empCode, 'failed');
+            return;
+          }
         }
       }
       
@@ -666,30 +697,12 @@ class FirebaseMonitor {
    * @returns {string|null} Department name or null if not found
    */
   getDepartmentNameFromId(departmentId) {
-    const departments = [
-      { id: 1, name: "Department" },
-      { id: 2, name: "CSE" },
-      { id: 3, name: "ECE" },
-      { id: 4, name: "MECH" },
-      { id: 5, name: "CIVIL" },
-      { id: 6, name: "IT" },
-      { id: 7, name: "AIML" },
-      { id: 8, name: "CYBER SECURITY" },
-      { id: 9, name: "AIDS" },
-      { id: 10, name: "EEE" },
-      { id: 14, name: "ADMIN" },
-      { id: 11, name: "DCSE" },
-      { id: 12, name: "DECE" },
-      { id: 13, name: "DMECH" },
-      { id: 15, name: "S&H" },
-      { id: 16, name: "DIPLOMA" },
-      { id: 17, name: "OTHERS" },
-      { id: 18, name: "DEEE" },
-      { id: 19, name: "DAUTO" }
-    ];
-    
-    const department = departments.find(dept => dept.id == departmentId);
-    return department ? department.name : null;
+    const dept = DEPARTMENTS.find(d => d.id == departmentId);
+    if (!dept) {
+      console.error(`❌ Unknown department ID: ${departmentId}. Add it to the DEPARTMENTS list at the top of firebaseMonitor.js`);
+      return null;
+    }
+    return dept.name;
   }
 
   /**

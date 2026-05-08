@@ -1,0 +1,14 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(Get-ChildItem -Path \"d:\\\\Backend-Module\" -Recurse -Force)",
+      "Bash(Select-Object FullName)",
+      "Bash(Sort-Object FullName)",
+      "Bash(Remove-Item \"d:\\\\Backend-Module\\\\backend.log\" -ErrorAction SilentlyContinue)",
+      "Bash(Remove-Item \"d:\\\\Backend-Module\\\\daemon\\\\ssecbackendservice.0.out.log\" -ErrorAction SilentlyContinue)",
+      "Bash(Remove-Item \"d:\\\\Backend-Module\\\\daemon\\\\ssecbackendservice.1.out.log\" -ErrorAction SilentlyContinue)",
+      "Bash(Remove-Item \"d:\\\\Backend-Module\\\\daemon\\\\ssecbackendservice.2.out.log\" -ErrorAction SilentlyContinue)",
+      "Bash(Remove-Item \"d:\\\\Backend-Module\\\\daemon\\\\ssecbackendservice.3.out.log\" -ErrorAction SilentlyContinue)"
+    ]
+  }
+}
